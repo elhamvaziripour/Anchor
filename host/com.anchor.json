@@ -1,0 +1,9 @@
+{
+  "name": "com.anchor",
+  "description": "Signiture Verifier",
+  "path": "/etc/opt/chrome/native-messaging-hosts/native-messaging-example-host",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/"
+  ]
+}

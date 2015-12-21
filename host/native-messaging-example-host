@@ -1,0 +1,186 @@
+#!/usr/bin/env python
+import base64
+import simplejson
+from OpenSSL import crypto
+import sys
+import struct
+import os
+from os.path import expanduser
+import threading
+import json
+import time
+import re
+import urllib2
+import uuid
+import Queue
+from netlib.odict import ODictCaseless
+import subprocess
+from subprocess import call
+import tempfile
+from libmproxy.proxy.config import ProxyConfig
+from libmproxy import controller, proxy
+from libmproxy.proxy.server import ProxyServer
+lock = threading.Lock()
+sharedVars = {
+    'shouldClose': False
+}
+try:
+    class OpenSSLVerifier(object):
+        """Verifies the signature on a message."""
+        def __init__(self, pubkey):
+            self._pubkey = pubkey
+        def verify(self, message, signature, digest):
+            try:
+                crypto.verify(self._pubkey, signature, message, digest)
+                return True
+            except:
+                return False
+        @staticmethod
+        def from_string(key_pem, is_x509_cert):
+            if is_x509_cert:
+                pubkey = crypto.load_certificate(crypto.FILETYPE_PEM, key_pem)
+            else:
+                pubkey = crypto.load_certificate_request(crypto.FILETYPE_PEM, key_pem)
+            return OpenSSLVerifier(pubkey)
+    
+    class OpenSSLSigner(object):
+        """Signs messages with a private key."""
+        def __init__(self, pkey):
+            self._key = pkey
+        def sign(self, message, digest):
+            return crypto.sign(self._key, message, digest)
+        @staticmethod
+        def from_string(key, password='notasecret'):
+            if key.startswith('-----BEGIN '):
+                pkey = crypto.load_privatekey(crypto.FILETYPE_PEM, key)
+            else:
+                pkey = crypto.load_pkcs12(key, password).get_privatekey()
+            return OpenSSLSigner(pkey)
+except ImportError:
+    OpenSSLVerifier = None
+    OpenSSLSigner = None
+
+
+class flowMonitor(controller.Master):
+    def __init__(self, server):
+        send_message('{"echo": "hah"}')
+        controller.Master.__init__(self, server)
+        self.signer = OpenSSLSigner("")
+        self.signer = self.signer.from_string(open('/etc/opt/chrome/native-messaging-hosts/keys/privkey.pem').read())
+        self.verifier = OpenSSLVerifier("")
+        self.verifier = self.verifier.from_string(open('/etc/opt/chrome/native-messaging-hosts/keys/newcert.pem').read(), True)
+
+    def run(self):
+        #send_message('{"echo": "hah"}') 
+    
+        try:
+            return controller.Master.run(self)
+        except KeyboardInterrupt:
+            self.shutdown()
+
+    def handle_request(self, flow):
+        request_body = flow.request.content
+        signature = self.signer.sign(request_body,'sha256' )
+        signature = base64.urlsafe_b64encode(signature)
+        flow.request.headers["signature"]= signature
+        flow.request.headers["digest"]= 'sha256'
+        flow.reply()
+
+    def handle_response(self, flow):
+        response_body = flow.response.content
+        verified = False
+        if 'signature' in flow.response.headers:
+           signature = base64.urlsafe_b64decode(flow.response.headers['signature'])
+           if 'digest' in flow.response.headers:
+               digest = flow.response.headers['digest']
+           else:
+               digest = 'sha256'
+           verified = self.verifier.verify(response_body[:-1],signature, digest)
+        if (verified == True):
+            flow.response.headers['trust'] = '1'
+        else:
+            flow.response.headers['trust'] = '0'
+        flow.reply()
+
+try:
+    import Tkinter
+    import tkMessageBox
+except ImportError:
+    Tkinter = None
+if sys.platform == "win32":
+    import os, msvcrt
+    msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
+    msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+
+def send_message(message):
+    sys.stdout.write(struct.pack('I', len(message)))
+    sys.stdout.write(message)
+    sys.stdout.flush()
+
+def unload_daemons():
+    sharedVars['shouldClose'] = True
+    lock.release()
+    return
+
+def start_server(port):
+    proxyConfig = proxy.ProxyConfig(port=8080)
+    server =  ProxyServer(proxyConfig)
+    m = flowMonitor(server)
+    m.run()
+  
+# Thread that reads messages from the webapp.
+def read_thread_func(queue):
+    #lock.acquire()
+    message_number = 0
+    while 1:
+        # Read the message length (first 4 bytes).
+        text_length_bytes = sys.stdin.read(4)
+        if len(text_length_bytes) == 0:
+            if queue:
+                queue.put(None)
+            sys.exit(0)
+        # Unpack message length as 4 byte integer.
+        text_length = struct.unpack('i', text_length_bytes)[0]
+        # Read the text (JSON object) of the message.
+        text = sys.stdin.read(text_length).decode('utf-8')
+        if queue:
+            queue.put(text)
+        #message = json.loads('%s' % text)
+        if text == None:
+            unload_daemons()
+            #sys.exit(0)
+        else:
+            if(text =='"stop"'):
+                #lock.release()
+                #self.log("Proxy is stoped working!")
+                send_message("Proxy is stoped working!")
+                unload_daemons()
+                #sys.exit(0)
+            '''
+            if (text== '"start"'):
+                thread = threading.Thread(target=start_server, args=(8080,))
+                thread.daemon = True
+                thread.start()
+                #self.log("Proxy is working!")
+                send_message("Proxy is working!")
+            '''
+
+def Main():
+    lock.acquire()
+    queue = Queue.Queue()
+    threadp = threading.Thread(target=start_server, args=(8080,))
+    threadp.daemon = True
+    threadp.start()
+    threadr = threading.Thread(target=read_thread_func, args=(queue,))
+    threadr.daemon = True
+    threadr.start()
+    send_message("Proxy is working!")
+    #while not sharedVars['shouldClose']:
+    #    time.sleep(1)
+    lock.acquire()
+    threadr._Thread__stop()
+    threadp._Thread__stop()
+    sys.exit(0)
+
+if __name__ == '__main__':
+    Main()

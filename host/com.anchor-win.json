@@ -1,0 +1,10 @@
+
+{
+  "name": "com.anchor",
+  "description": "Signiture Verifier",
+  "path": "native-messaging-example-host.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/"
+  ]
+}
